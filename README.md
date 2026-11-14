@@ -37,11 +37,12 @@
 | # | 模块名 | 对应页面 | 对应 services + controller | 主要 API |
 |---|---|---|---|---|
 | ① | 站点与栏目登记 | `#/sites` 站点与栏目 | `site_service` + `catalog_service` + `sitemap_service` / `site_controller` `catalog_controller` | `GET/POST /api/sites`、`PATCH /api/sites/{id}`、`GET/POST /api/catalog`、`GET /api/sitemaps` |
-| ② | 分页抓取调度 | `#/crawl-runs` 抓取运行 | `crawl_run_service` + `crawl_engine` / `crawl_run_controller` | `GET/POST /api/crawl-runs`、`GET /api/crawl-runs/{id}` |
-| ③ | URL 规范化与采集（算法 A） | `#/sites`（口径核对）+ `#/crawl-runs`（统计） | `services/url_normalize.py` + `services/crawl_engine.py` / `catalog_controller.preview_normalize` | `GET /api/catalog/normalize?url=` |
-| ④ | 三向对账（算法 B） | `#/crawl-runs` → `#/defects` | `services/reconcile_engine.py` / `crawl_run_service.execute_run` | `POST /api/crawl-runs` 内触发；`GET /api/defects?run_id=` |
-| ⑤ | 缺陷单与整改 | `#/defects` 对账缺陷 | `defect_service` / `defect_controller` | `GET /api/defects`、`GET /api/defects/{id}`、`PATCH /api/defects/{id}/review`、`GET /api/defects/facets` |
-| ⑥ | 覆盖率报表与导出 | `#/reports` 报表与导出（含审计页签） | `export_service` + `overview_service` + `audit_service` / `export_controller` | `GET /api/exports/{defects,sites,coverage}.csv`、`GET /api/overview`、`GET /api/audit` |
+| ② | sitemap 索引快照（可恢复展开） | `#/snapshots` sitemap 快照 | `sitemap_reader` + `sitemap_merge` + `snapshot_service` / `snapshot_controller` | `GET/POST /api/sitemap-snapshots`、`POST /api/sitemap-snapshots/{id}/resume`、`GET /api/sitemap-snapshots/{id}`、`GET /api/sitemap-snapshots/reviews`、`PATCH /api/sitemap-snapshots/reviews/{id}` |
+| ③ | 分页抓取调度 | `#/crawl-runs` 抓取运行 | `crawl_run_service` + `crawl_engine` / `crawl_run_controller` | `GET/POST /api/crawl-runs`、`GET /api/crawl-runs/{id}` |
+| ④ | URL 规范化与采集（算法 A） | `#/sites`（口径核对）+ `#/crawl-runs`（统计） | `services/url_normalize.py` + `services/crawl_engine.py` / `catalog_controller.preview_normalize` | `GET /api/catalog/normalize?url=` |
+| ⑤ | 三向对账（算法 B） | `#/crawl-runs` → `#/defects` | `services/reconcile_engine.py` / `crawl_run_service.execute_run` | `POST /api/crawl-runs` 内触发；`GET /api/defects?run_id=` |
+| ⑥ | 缺陷单与整改 | `#/defects` 对账缺陷 | `defect_service` / `defect_controller` | `GET /api/defects`、`GET /api/defects/{id}`、`PATCH /api/defects/{id}/review`、`GET /api/defects/facets` |
+| ⑦ | 覆盖率报表与导出 | `#/reports` 报表与导出（含审计页签） | `export_service` + `overview_service` + `audit_service` / `export_controller` | `GET /api/exports/{defects,sites,coverage}.csv`、`GET /api/overview`、`GET /api/audit` |
 
 > 登录（`/api/auth/*`）与审计（`/api/audit`）按约定只算横切能力，不占业务模块配额。
 
@@ -97,10 +98,13 @@ backend/
   src/{config,constants,controllers,middlewares,models,routes,schemas,services,utils}
   scripts/{seed_demo.py,demo_config.py,worker_healthcheck.sh}
   migrations/
-  tests/{test_url_normalize.py,test_crawl_engine.py,test_reconcile_engine.py,test_acceptance.py,test_security.py}
+  tests/{test_url_normalize.py,test_crawl_engine.py,test_sitemap_reader.py,test_sitemap_merge.py,test_reconcile_engine.py,test_snapshot_service.py,test_snapshot_rbac.py,test_acceptance.py,test_security.py}
 frontend/
   site/{index.html,css/{tokens,app}.css,js/{config,api,store,ui,app}.js,js/pages/*.js}
 sample_site/<site_code>/         ← seed 运行时在容器内生成（不进仓库）
+  sitemap.xml                    ← sitemapindex 入口
+  sitemap-1.xml / sitemap-2.xml  ← 明文叶子分片
+  sitemap-3.xml.gz               ← gzip 叶子分片
 ```
 
 ## 9. 环境变量
@@ -133,6 +137,23 @@ sample_site/<site_code>/         ← seed 运行时在容器内生成（不进�
 - **指标**：覆盖率 `coverage = |A∩B∩C| / |A|`；不可达率 `unreachable_rate = |A\\C| / |A|`；死链率 `sitemap_dead_rate = dead / |B|`。
 - **本批实测**：`A=360`、`B=362`、`A∩B∩C=348` → 覆盖率 `348/360 = 96.67%`；缺陷 31 条（P0 14 / P1 12 / P2 5）。
 
+### 算法 C｜sitemap 索引快照：可恢复展开 + 冲突合并（`services/sitemap_reader.py` + `sitemap_merge.py` + `snapshot_service.py`）
+
+站点 sitemap 入口是一个 `sitemapindex`，逐层指向同站多个叶子分片（演示固定 3 个，末个 `.xml.gz` 压缩），同一规范化 URL 会在不同分片重复出现且 lastmod 不一致。
+
+- **逐层展开（`sitemap_reader.flatten_index`）**：只跟同站分片，跨站/非 http 进 `skipped`；嵌套索引递归（深度上限 4）、visited 防环路；分片内容算 sha256。损坏但同站可达的分片登记为 `failed` 检查点，可在续跑时重试，而不是从计划里消失。
+- **断点续跑不重复**：一个叶子分片一行检查点（`sitemap_shards`，`pending/done/failed`），读完即把原始记录落 `raw_records`；续跑只回放 done 分片、重试 failed 分片，done 分片永不重读、不重复写。
+- **合并规则（`sitemap_merge.merge_records`，顺序即优先级）**：
+  1. 按 canonical 归组，每条来源（loc/lastmod/分片序号/文件）原样保留；
+  2. lastmod 必须可解析，缺失/非法 → `needs_review` 待人工复核，不参与自动裁决；
+  3. 全部合法 → 取**最新 lastmod**（`lastmod_latest`）；
+  4. 最新并列 → **分片序号最小**（`shard_order_min`）；
+  5. 再并列 → **loc 字典序最小**（`loc_lex_min`），保证结论唯一可复现；单来源为 `single_source`。
+  待复核不阻断巡检：给确定性临时采用值，结论标 `review_pending`，人工 PATCH 裁决后同步到主表。
+- **快照与激活（`snapshot_service`）**：批次状态 `expanding → ready → active`（失败 `failed`、被顶替 `archived`）。**半批结果只存在 `sitemap_url_records`，只有 active 批次在同一事务内重写 `sitemap_entries`；激活失败整事务回滚，旧版快照继续可用。**
+- **同一批快照**：批次指纹 = 全分片 sha256 的再哈希；巡检开始前 `ensure_active_snapshot` 门控（指纹未变复用旧批次），运行记录组合指纹，分页采集、合并、探测、对账全程只用该批次条目，结束前再校验一次，不一致直接作废本次结果。失败运行与无指纹运行不进覆盖率与 CSV 导出；历史缺陷与整改记录只追加、不物理删除。
+- **本批实测**：3 站各 3 分片（共 9 个，3 个 gzip）、374 条原始记录 → 合并 362 个 canonical；跨分片冲突 12 个（`lastmod_latest` 6 / `shard_order_min` 3 / `review_pending` 3），待复核 3 个。
+
 ## 11. seed 数量口径
 
 | 项 | 数量 | 说明 |
@@ -141,7 +162,11 @@ sample_site/<site_code>/         ← seed 运行时在容器内生成（不进�
 | 站点（`SEED_SUMMARY sources=`） | 3 | `zwgk-hezhou` / `zwfw-hezhou` / `quxian-hezhou` |
 | 目录条目（A） | 360 | 每站 6 栏 × 120 条 |
 | 分页清单页 | 36 | 每站 12 页（page_size=12） |
-| sitemap loc（B） | 362 | 360 − 12 条漏收 + 14 条死链 |
+| sitemap 索引 / 分片 | 3 / 9 | 每站 1 个 `sitemapindex` + 3 个叶子分片（末个 gzip） |
+| 分片原始记录 | 374 | 362 个 canonical + 12 条跨分片重复副本 |
+| sitemap loc（B，合并后 canonical） | 362 | 360 − 12 条漏收 + 14 条死链 |
+| 跨分片 lastmod 冲突 | 12 | 每站 4 个；其中待复核 3 个（非法 lastmod） |
+| 快照批次 | 3 | 每站 1 个 active 批次，指纹稳定、重复 seed 不重建 |
 | 巡检（`runs=`） | 1 | `seed-crawl-2026q4`，触发方式 `seed` |
 | 缺陷单（`findings=`） | 31 | P0 14 / P1 12 / P2 5 |
 | 待整改（`pending=`） | 31 | seed 不覆盖人工整改状态 |
@@ -157,6 +182,10 @@ sample_site/<site_code>/         ← seed 运行时在容器内生成（不进�
 | 巡检状态 `queued/running/success/partial/failed` | `backend/src/constants/enums.py::CrawlStatus` | `ENUMS.crawlStatus` |
 | 触发方式 `manual/schedule/seed` | `backend/src/constants/enums.py::TriggerKind` | `ENUMS.trigger` |
 | 分页发现方式 `home_link/rel_next/index_guess/sitemap_probe` | `backend/src/constants/enums.py::DiscoverySource` | `ENUMS.discovery` |
+| 快照批次状态 `expanding/ready/active/failed/archived` | `backend/src/services/snapshot_service.py` 常量 | `ENUMS.batchStatus` |
+| 分片状态 `pending/done/failed` | `backend/src/services/snapshot_service.py` 常量 | `ENUMS.shardStatus` |
+| 合并依据 `single_source/lastmod_latest/shard_order_min/loc_lex_min/review_pending` | `backend/src/services/sitemap_merge.py` | `ENUMS.decisionBasis` |
+| 复核状态 `none/open/resolved` | `backend/src/services/snapshot_service.py` 常量 | `ENUMS.reviewStatus` |
 
 ## 13. 视觉方向
 

@@ -11,6 +11,7 @@ from src.routes.health import router as health_router
 from src.routes.overview import router as overview_router
 from src.routes.sites import router as sites_router
 from src.routes.sitemaps import router as sitemaps_router
+from src.routes.snapshots import router as snapshots_router
 
 api_router = APIRouter()
 api_router.include_router(health_router)
@@ -19,6 +20,7 @@ api_router.include_router(overview_router)
 api_router.include_router(sites_router)
 api_router.include_router(catalog_router)
 api_router.include_router(sitemaps_router)
+api_router.include_router(snapshots_router)
 api_router.include_router(crawl_runs_router)
 api_router.include_router(defects_router)
 api_router.include_router(exports_router)

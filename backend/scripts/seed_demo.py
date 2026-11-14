@@ -113,26 +113,21 @@ def ensure_catalog(db, sites: dict[str, Site]) -> int:
 
 
 def ensure_sitemaps(db, sites: dict[str, Site]) -> int:
+    """展开 sitemap 索引快照并激活；sitemap_entries 只由 active 批次写入。
+
+    幂等：fixture 内容指纹不变时复用已有 active 批次，不重建、不产生半批。
+    """
+    from src.services import snapshot_service
+
+    total = 0
     for spec in SITES:
         site = sites.get(spec["code"])
         if site is None:
             continue
-        for row in fixture_site.sitemap_rows(spec):
-            exists = db.scalar(select(SitemapEntry).where(SitemapEntry.site_id == site.id, SitemapEntry.loc == row["loc"]))
-            if exists is None:
-                db.add(
-                    SitemapEntry(
-                        site_id=site.id,
-                        loc=row["loc"],
-                        canonical_url=row["canonical_url"],
-                        lastmod=row["lastmod"],
-                        changefreq=row["changefreq"],
-                        priority=row["priority"],
-                        source_file=row["source_file"],
-                    )
-                )
+        batch = snapshot_service.ensure_active_snapshot(db, site, created_by="seed")
+        total += int(batch.canonical_total or 0)
     db.flush()
-    return db.scalar(select(func.count()).select_from(SitemapEntry)) or 0
+    return db.scalar(select(func.count()).select_from(SitemapEntry)) or total
 
 
 def ensure_fixtures() -> None:

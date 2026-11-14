@@ -21,12 +21,22 @@ DEFECT_HEADERS = [
     "栏目",
     "canonical URL",
     "sitemap loc",
+    "lastmod 采用依据",
+    "是否待复核",
     "证据摘要",
     "处理状态",
     "复核人",
     "复核备注",
     "检出时间",
 ]
+
+BASIS_EXPORT_LABELS = {
+    "single_source": "单一来源",
+    "lastmod_latest": "取最新 lastmod",
+    "shard_order_min": "并列取序号最小分片",
+    "loc_lex_min": "并列取 loc 字典序最小",
+    "review_pending": "待人工复核",
+}
 
 SITE_HEADERS = [
     "站点编码",
@@ -46,6 +56,8 @@ SITE_HEADERS = [
 
 COVERAGE_HEADERS = [
     "巡检号",
+    "快照批次",
+    "快照指纹",
     "站点编码",
     "站点名称",
     "目录条目 A",
@@ -55,6 +67,8 @@ COVERAGE_HEADERS = [
     "覆盖率",
     "不可达率",
     "死链数",
+    "冲突数",
+    "待复核数",
     "缺陷数",
     "P0",
     "P1",
@@ -97,6 +111,8 @@ def defects_csv(db: Session, run_id: int | None = None) -> bytes:
             defect.column_name,
             defect.canonical_url,
             (defect.evidence or {}).get("sitemap_loc", ""),
+            BASIS_EXPORT_LABELS.get((defect.evidence or {}).get("decision_basis"), ""),
+            "是" if (defect.evidence or {}).get("needs_review") else "否",
             _evidence_text(defect),
             DEFECT_STATUS_LABELS.get(defect.status, defect.status),
             defect.reviewer or "",
@@ -137,8 +153,23 @@ def sites_csv(db: Session) -> bytes:
     return to_csv(SITE_HEADERS, data)
 
 
+def _latest_exportable_run(db: Session, run_id: int | None) -> CrawlRun | None:
+    """导出只认真实跑完且带快照指纹的运行；半批/失败/无指纹结果一律跳过。"""
+    if run_id:
+        run = db.get(CrawlRun, run_id)
+        if run is None or not run.snapshot_fingerprint or run.status == "failed":
+            return None
+        return run
+    return db.scalar(
+        select(CrawlRun)
+        .where(CrawlRun.snapshot_fingerprint.is_not(None), CrawlRun.status != "failed")
+        .order_by(CrawlRun.id.desc())
+        .limit(1)
+    )
+
+
 def coverage_csv(db: Session, run_id: int | None = None) -> bytes:
-    run = db.get(CrawlRun, run_id) if run_id else db.scalar(select(CrawlRun).order_by(CrawlRun.id.desc()).limit(1))
+    run = _latest_exportable_run(db, run_id)
     if run is None:
         return to_csv(COVERAGE_HEADERS, [])
     data = []
@@ -148,6 +179,8 @@ def coverage_csv(db: Session, run_id: int | None = None) -> bytes:
         data.append(
             [
                 run.run_no,
+                item.get("snapshot_batch_no", ""),
+                (item.get("snapshot_fingerprint") or "")[:12],
                 item.get("code", ""),
                 item.get("name", ""),
                 catalog_total,
@@ -157,6 +190,8 @@ def coverage_csv(db: Session, run_id: int | None = None) -> bytes:
                 f"{float(item.get('coverage') or 0):.4f}",
                 f"{float(item.get('unreachable_rate') or 0):.4f}",
                 int(item.get("dead") or 0),
+                int(item.get("conflict_total") or 0),
+                int(item.get("review_open_total") or 0),
                 int(item.get("defects") or 0),
                 int(item.get("p0") or 0),
                 int(item.get("p1") or 0),
@@ -167,6 +202,8 @@ def coverage_csv(db: Session, run_id: int | None = None) -> bytes:
         [
             run.run_no,
             "ALL",
+            (run.snapshot_fingerprint or "")[:12],
+            "ALL",
             "全部站点",
             int(run.catalog_count or 0),
             int(run.sitemap_count or 0),
@@ -175,6 +212,8 @@ def coverage_csv(db: Session, run_id: int | None = None) -> bytes:
             f"{float(run.coverage or 0):.4f}",
             f"{float(run.unreachable_rate or 0):.4f}",
             sum(int(item.get("dead") or 0) for item in (run.metrics or {}).get("sites", [])),
+            sum(int(item.get("conflict_total") or 0) for item in (run.metrics or {}).get("sites", [])),
+            sum(int(item.get("review_open_total") or 0) for item in (run.metrics or {}).get("sites", [])),
             int(run.defect_count or 0),
             int(run.p0_count or 0),
             int(run.p1_count or 0),

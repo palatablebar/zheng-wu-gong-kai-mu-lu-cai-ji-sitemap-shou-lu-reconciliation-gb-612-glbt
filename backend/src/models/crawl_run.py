@@ -38,5 +38,8 @@ class CrawlRun(Base):
     metrics: Mapped[dict] = mapped_column(JSON, default=dict)
     log_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     seed_key: Mapped[str | None] = mapped_column(String(120), unique=True, nullable=True)
+    # 本批巡检实际使用的 sitemap 快照指纹与各站点批次；为空说明是旧版无快照数据
+    snapshot_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    snapshot_batch_ids: Mapped[dict] = mapped_column(JSON, default=dict)
     started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

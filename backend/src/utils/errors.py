@@ -9,6 +9,10 @@ ERROR_MESSAGES: dict[str, str] = {
     "VALIDATION": "请求参数不合法",
     "CONFLICT": "数据冲突，请刷新后重试",
     "RATE_LIMITED": "请求过于频繁，请稍后再试",
+    "SNAPSHOT_INCOMPLETE": "sitemap 快照未完整展开，已保留旧版快照",
+    "SNAPSHOT_MISSING": "巡检缺少 sitemap 快照，拒绝执行对账",
+    "SNAPSHOT_NOT_ACTIVE": "引用的快照批次不是已激活状态",
+    "SNAPSHOT_MISMATCH": "采集、合并、探测使用的 sitemap 快照不一致，本次结果作废",
     "INTERNAL": "服务内部错误",
 }
 

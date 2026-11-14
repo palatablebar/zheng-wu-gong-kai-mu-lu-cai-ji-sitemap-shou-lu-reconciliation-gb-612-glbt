@@ -20,7 +20,9 @@ from src.models.catalog_item import CatalogItem
 from src.models.crawl_run import CrawlRun
 from src.models.defect import Defect
 from src.models.site import Site
+from src.models.sitemap_batch import SnapshotBatch
 from src.models.sitemap_entry import SitemapEntry
+from src.models.sitemap_url_record import SitemapUrlRecord
 from src.utils.timeutil import iso_utc, local_now, utcnow
 
 
@@ -55,6 +57,26 @@ def overview(db: Session) -> dict:
     sitemap_total = db.scalar(select(func.count()).select_from(SitemapEntry)) or 0
     runs_total = db.scalar(select(func.count()).select_from(CrawlRun)) or 0
     defects_total = db.scalar(select(func.count()).select_from(Defect)) or 0
+    # 当前已激活快照批次里仍待人工裁决的 lastmod 冲突
+    snapshot_review_open = (
+        db.scalar(
+            select(func.count())
+            .select_from(SitemapUrlRecord)
+            .join(SnapshotBatch, SitemapUrlRecord.batch_id == SnapshotBatch.id)
+            .where(
+                SnapshotBatch.status == "active",
+                SitemapUrlRecord.needs_review.is_(True),
+                SitemapUrlRecord.review_status == "open",
+            )
+        )
+        or 0
+    )
+    active_snapshot_batches = (
+        db.scalar(
+            select(func.count()).select_from(SnapshotBatch).where(SnapshotBatch.status == "active")
+        )
+        or 0
+    )
 
     latest = db.scalar(select(CrawlRun).order_by(CrawlRun.id.desc()).limit(1))
     latest_run = None
@@ -158,6 +180,8 @@ def overview(db: Session) -> dict:
         "p1_total": db.scalar(select(func.count()).select_from(Defect).where(Defect.severity == "p1")) or 0,
         "p2_total": db.scalar(select(func.count()).select_from(Defect).where(Defect.severity == "p2")) or 0,
         "worker_alive": worker_alive(),
+        "snapshot_review_open": snapshot_review_open,
+        "active_snapshot_batches": active_snapshot_batches,
         "latest_run": latest_run,
         "severity": _ordered_counts(severity_rows, DEFECT_SEVERITY_ORDER, DEFECT_SEVERITY_LABELS),
         "status": _ordered_counts(status_rows, DEFECT_STATUS_ORDER, DEFECT_STATUS_LABELS),

@@ -21,9 +21,10 @@ export const BRAND = {
 export const NAV = [
   { to: '#/overview', no: '01', label: '总览', permission: 'overview:read' },
   { to: '#/sites', no: '02', label: '站点与栏目', permission: 'site:read' },
-  { to: '#/crawl-runs', no: '03', label: '抓取运行', permission: 'crawl:read' },
-  { to: '#/defects', no: '04', label: '对账缺陷', permission: 'defect:read' },
-  { to: '#/reports', no: '05', label: '报表与导出', permission: 'defect:read' },
+  { to: '#/snapshots', no: '03', label: 'sitemap 快照', permission: 'crawl:read' },
+  { to: '#/crawl-runs', no: '04', label: '抓取运行', permission: 'crawl:read' },
+  { to: '#/defects', no: '05', label: '对账缺陷', permission: 'defect:read' },
+  { to: '#/reports', no: '06', label: '报表与导出', permission: 'defect:read' },
 ];
 
 export const ROLE_LABELS = {
@@ -86,6 +87,30 @@ export const ENUMS = {
     index_guess: '页码猜解',
     sitemap_probe: 'sitemap 探测',
   },
+  batchStatus: {
+    expanding: '展开中',
+    ready: '待激活',
+    active: '已激活',
+    failed: '失败',
+    archived: '已归档',
+  },
+  shardStatus: {
+    pending: '待读',
+    done: '已完成',
+    failed: '失败',
+  },
+  reviewStatus: {
+    none: '无需复核',
+    open: '待复核',
+    resolved: '已裁决',
+  },
+  decisionBasis: {
+    single_source: '单一来源，无需裁决',
+    lastmod_latest: '取最新 lastmod',
+    shard_order_min: 'lastmod 并列，取序号最小分片',
+    loc_lex_min: 'lastmod 与分片均并列，取 loc 字典序最小',
+    review_pending: '存在无法解析的 lastmod，待人工复核',
+  },
 };
 
 export const CATEGORY_TONE = {
@@ -110,4 +135,12 @@ export function statusTone(status) {
 
 export function crawlTone(status) {
   return { success: 'ok', partial: 'warn', failed: 'danger', running: 'info', queued: 'info' }[status] || 'info';
+}
+
+export function batchTone(status) {
+  return { active: 'ok', ready: 'warn', expanding: 'info', failed: 'danger', archived: 'info' }[status] || 'info';
+}
+
+export function basisTone(basis) {
+  return basis === 'review_pending' ? 'danger' : basis === 'single_source' ? 'ok' : 'warn';
 }

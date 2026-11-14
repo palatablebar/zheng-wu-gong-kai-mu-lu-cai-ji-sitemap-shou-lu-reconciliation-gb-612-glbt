@@ -1,12 +1,38 @@
 """端到端验收：用 demo_config 的真实口径离线跑「fixture → 算法 A → 算法 B」，核对 seed 数量。
 
 不依赖数据库、不依赖网络：只在 tmp_path 里写静态站，跑的就是容器里跑的那套代码。
+sitemap 入口是索引 + 多分片（含 gzip），先经 sitemap_reader 展开、sitemap_merge 合并，
+再把合并后的 canonical 集合送进三向对账。
 """
 from __future__ import annotations
 
 from src.constants.demo_data import PAGE_SIZE, SITES
-from src.services import crawl_engine, fixture_site, reconcile_engine
+from src.services import (
+    crawl_engine,
+    fixture_site,
+    reconcile_engine,
+    sitemap_merge,
+    sitemap_reader,
+)
 from src.services.url_normalize import normalize_url
+
+
+def _merged_sitemap(spec, root):
+    """展开 sitemap 索引分片并按合并规则裁决，输出 reconcile 需要的 loc 行。"""
+    loader = sitemap_reader.SitemapFixture(root)
+    expanded = sitemap_reader.expand_all(loader, spec["home_url"], spec["sitemap_url"])
+    assert expanded["errors"] == [], expanded["errors"]
+    assert len(expanded["shards"]) == fixture_site.SHARD_COUNT
+    merged = sitemap_merge.merge_records(expanded["records"])
+    return [
+        {
+            "loc": conclusion["loc"],
+            "canonical_url": canonical,
+            "lastmod": conclusion["lastmod"],
+            "source_file": conclusion["source_file"],
+        }
+        for canonical, conclusion in sorted(merged["merged"].items())
+    ]
 
 
 def _run_site(spec, base):
@@ -16,7 +42,7 @@ def _run_site(spec, base):
         home_url=spec["home_url"], fixture_root=root, page_size=PAGE_SIZE, max_depth=3
     )
     catalog_rows = fixture_site.catalog_rows(spec)
-    sitemap_rows = fixture_site.sitemap_rows(spec)
+    sitemap_rows = _merged_sitemap(spec, root)
     probes = dict(crawl["probes"])
     extra = [row["canonical_url"] for row in sitemap_rows if normalize_url(row["canonical_url"]) not in probes]
     if extra:
@@ -89,3 +115,29 @@ def test_fixture_build_is_deterministic(tmp_path):
     assert files_a == files_b
     sample = "xxgk/zcwj/index_3.html"
     assert (root_a / sample).read_bytes() == (root_b / sample).read_bytes()
+    # 索引与 gzip 分片同样逐字节稳定
+    assert (root_a / "sitemap.xml").read_bytes() == (root_b / "sitemap.xml").read_bytes()
+    assert (root_a / "sitemap-3.xml.gz").read_bytes() == (root_b / "sitemap-3.xml.gz").read_bytes()
+
+
+def test_sitemap_index_has_sharded_conflicts_and_review_queue(tmp_path):
+    """每个站点：索引 1 个 + 分片 3 个（末个 gzip），4 个跨分片冲突、1 个待复核。"""
+    for spec in SITES:
+        root = fixture_site.fixture_root(spec["code"], base=tmp_path)
+        fixture_site.build_site(spec, root)
+        loader = sitemap_reader.SitemapFixture(root)
+        plan = sitemap_reader.flatten_index(loader, spec["home_url"], spec["sitemap_url"])
+        assert [shard["source_file"] for shard in plan["shards"]] == fixture_site.SHARD_FILES
+        assert plan["shards"][-1]["compressed"] is True
+        expanded = sitemap_reader.expand_all(loader, spec["home_url"], spec["sitemap_url"])
+        merged = sitemap_merge.merge_records(expanded["records"])
+        assert merged["stats"]["conflict_total"] == 4
+        assert merged["stats"]["needs_review_total"] == 1
+        # 合并后 canonical 集合与旧扁平全集一致（重复副本不引入新 URL）
+        flat = {normalize_url(row["canonical_url"]) for row in fixture_site.sitemap_rows(spec)}
+        assert set(merged["merged"]) == flat
+        # 每个冲突 canonical 都保留了至少两个分片来源
+        for conclusion in merged["merged"].values():
+            if conclusion["duplicate"]:
+                assert conclusion["source_count"] >= 2
+                assert len(conclusion["sources"]) == conclusion["source_count"]

@@ -11,6 +11,9 @@ from src.models.audit import AuditLog  # noqa: E402
 from src.models.site import Site  # noqa: E402
 from src.models.catalog_item import CatalogItem  # noqa: E402
 from src.models.sitemap_entry import SitemapEntry  # noqa: E402
+from src.models.sitemap_batch import SnapshotBatch  # noqa: E402
+from src.models.sitemap_shard import SitemapShard  # noqa: E402
+from src.models.sitemap_url_record import SitemapUrlRecord  # noqa: E402
 from src.models.crawl_run import CrawlRun  # noqa: E402
 from src.models.defect import Defect  # noqa: E402
 
@@ -21,6 +24,9 @@ __all__ = [
     "Site",
     "CatalogItem",
     "SitemapEntry",
+    "SnapshotBatch",
+    "SitemapShard",
+    "SitemapUrlRecord",
     "CrawlRun",
     "Defect",
 ]

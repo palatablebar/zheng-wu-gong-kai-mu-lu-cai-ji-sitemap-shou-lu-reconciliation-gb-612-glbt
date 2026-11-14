@@ -20,9 +20,13 @@ logger = logging.getLogger(f"{settings.app_name}.app")
 
 def _bootstrap_database() -> None:
     from src.models import Base  # noqa: WPS433 - 延迟导入避免循环
+    from src.config.migrations import ensure_extra_columns
 
     wait_for_db()
     Base.metadata.create_all(bind=engine)
+    applied = ensure_extra_columns(engine)
+    if applied:
+        logger.info("[BOOTSTRAP] ensured columns: %s", ", ".join(applied))
 
 
 def _run_seed_once() -> None:

@@ -2,8 +2,15 @@
 
 一次巡检处理「一个站点」或「全部启用站点」。所有计算在后端完成，
 前端只消费 /api/crawl-runs 与 /api/defects 的结果。
+
+快照口径：巡检开始前为每个站点确保一个已激活的 sitemap 快照批次
+（snapshot_service.ensure_active_snapshot），分页采集、分片合并、可达探测、
+三向对账与缺陷落库全程使用该批次的同一份快照；批次指纹写进 crawl_run，
+任一步失败则整次运行置 failed，半批结果不进覆盖率/导出，旧缺陷与整改记录保留。
 """
 from __future__ import annotations
+
+import hashlib
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -16,8 +23,7 @@ from src.models.crawl_run import CrawlRun
 from src.models.defect import Defect
 from src.models.site import Site
 from src.models.sitemap_entry import SitemapEntry
-from src.services import crawl_engine, fixture_site, reconcile_engine
-from src.services.url_normalize import normalize_url
+from src.services import crawl_engine, fixture_site, reconcile_engine, snapshot_service
 from src.utils.errors import AppError
 from src.utils.timeutil import iso_utc, local_now, utcnow
 
@@ -49,6 +55,8 @@ def serialize(run: CrawlRun, site_name: str | None = None) -> dict:
         "p1_count": run.p1_count,
         "p2_count": run.p2_count,
         "metrics": run.metrics or {},
+        "snapshot_fingerprint": run.snapshot_fingerprint,
+        "snapshot_batch_ids": run.snapshot_batch_ids or {},
         "log_text": run.log_text,
         "started_at": iso_utc(run.started_at),
         "finished_at": iso_utc(run.finished_at),
@@ -76,17 +84,28 @@ def _catalog_payload(db: Session, site_id: int) -> list[dict]:
     ]
 
 
-def _sitemap_payload(db: Session, site_id: int) -> list[dict]:
-    rows = db.scalars(select(SitemapEntry).where(SitemapEntry.site_id == site_id)).all()
+def _sitemap_payload(db: Session, site_id: int, batch_id: int) -> list[dict]:
+    """只取当前激活批次写进主表的条目（同一批快照，半批数据不会出现）。"""
+    rows = db.scalars(
+        select(SitemapEntry).where(SitemapEntry.site_id == site_id, SitemapEntry.batch_id == batch_id)
+    ).all()
     return [
         {
             "loc": row.loc,
             "canonical_url": row.canonical_url,
             "lastmod": row.lastmod,
             "source_file": row.source_file,
+            "decision_basis": row.decision_basis,
+            "needs_review": row.needs_review,
+            "review_status": row.review_status,
         }
         for row in rows
     ]
+
+
+def _combined_fingerprint(batches: list) -> str:
+    parts = sorted(batch.snapshot_fingerprint for batch in batches if batch.snapshot_fingerprint)
+    return hashlib.sha256("".join(parts).encode()).hexdigest()
 
 
 def _upsert_defects(db: Session, run: CrawlRun, site: Site, defects: list[dict]) -> None:
@@ -151,6 +170,26 @@ def _site_metrics(site: Site, crawl: dict, result: dict) -> dict:
 
 def execute_run(db: Session, run: CrawlRun, sites: list[Site]) -> CrawlRun:
     run.status = CrawlStatus.RUNNING.value
+    # 阶段 0：为每个站点确保已激活快照；任一站点快照不完整 -> 整次巡检失败，
+    # 旧 active 快照与历史缺陷原样保留（ensure_active_snapshot 内部已回滚半批）。
+    batches: list = []
+    try:
+        for site in sites:
+            batch = snapshot_service.ensure_active_snapshot(db, site, created_by=run.operator_email)
+            batches.append(batch)
+        run.snapshot_batch_ids = {site.code: batch.id for site, batch in zip(sites, batches)}
+        run.snapshot_fingerprint = _combined_fingerprint(batches)
+        db.flush()
+    except Exception as exc:  # noqa: BLE001 - 快照未就绪一律转成 failed 运行，不抛 500
+        message = exc.message if isinstance(exc, AppError) else f"sitemap 快照未就绪：{exc}"
+        run.status = CrawlStatus.FAILED.value
+        run.log_text = f"巡检中止（已保留旧版快照与历史缺陷）：{message}"
+        run.metrics = {"snapshot_error": (exc.detail if isinstance(exc, AppError) else message)}
+        run.finished_at = utcnow()
+        db.flush()
+        return run
+
+    batch_by_site = {site.id: batch for site, batch in zip(sites, batches)}
     try:
         totals = {
             "pages": 0,
@@ -173,6 +212,7 @@ def execute_run(db: Session, run: CrawlRun, sites: list[Site]) -> CrawlRun:
             root = fixture_site.fixture_root(site.code)
             if spec is not None:
                 fixture_site.ensure_site_fixture(spec)
+            batch = batch_by_site[site.id]
             crawl = crawl_engine.crawl_site(
                 home_url=site.home_url,
                 fixture_root=root,
@@ -180,9 +220,14 @@ def execute_run(db: Session, run: CrawlRun, sites: list[Site]) -> CrawlRun:
                 max_depth=min(site.max_depth or 3, MAX_CRAWL_DEPTH),
                 max_pages=MAX_CRAWL_PAGES,
             )
-            sitemap_rows = _sitemap_payload(db, site.id)
+            # B 集合只来自当前激活批次（同一批快照）
+            sitemap_rows = _sitemap_payload(db, site.id, batch.id)
             probes = dict(crawl["probes"])
-            extra = [row["canonical_url"] for row in sitemap_rows if normalize_url(row["canonical_url"]) not in probes]
+            extra = [
+                row["canonical_url"]
+                for row in sitemap_rows
+                if row["canonical_url"] not in probes
+            ]
             if extra:
                 probes.update(crawl_engine.probe_urls(root, extra))
             result = reconcile_engine.reconcile(
@@ -193,12 +238,23 @@ def execute_run(db: Session, run: CrawlRun, sites: list[Site]) -> CrawlRun:
             )
             _upsert_defects(db, run, site, result["defects"])
             metrics = _site_metrics(site, crawl, result)
+            metrics["snapshot_batch_id"] = batch.id
+            metrics["snapshot_batch_no"] = batch.batch_no
+            metrics["snapshot_fingerprint"] = batch.snapshot_fingerprint
+            metrics["conflict_total"] = batch.conflict_total
+            metrics["needs_review_total"] = batch.needs_review_total
+            metrics["review_open_total"] = batch.review_open_total
             per_site.append(metrics)
             for key in totals:
                 totals[key] += int(metrics.get(key, 0) or 0)
             for key, value in (metrics.get("by_category") or {}).items():
                 by_category[key] = by_category.get(key, 0) + int(value)
             site.last_crawled_at = utcnow()
+
+        # 阶段末校验：对账结论仍对应同一批快照，否则作废本次结果
+        snapshot_service.verify_run_fingerprint(
+            db, list(run.snapshot_batch_ids.values()), run.snapshot_fingerprint
+        )
 
         catalog_total = totals["catalog_total"] or 0
         coverage = round(totals["hit"] / catalog_total, 4) if catalog_total else 0.0
@@ -237,10 +293,27 @@ def execute_run(db: Session, run: CrawlRun, sites: list[Site]) -> CrawlRun:
             "by_category": by_category,
             "sites": per_site,
             "sites_crawled": [site.code for site in sites],
+            "snapshot": {
+                "fingerprint": run.snapshot_fingerprint,
+                "batches": [
+                    {
+                        "site_code": site.code,
+                        "batch_id": batch_by_site[site.id].id,
+                        "batch_no": batch_by_site[site.id].batch_no,
+                        "fingerprint": batch_by_site[site.id].snapshot_fingerprint,
+                        "shards": batch_by_site[site.id].shard_total,
+                        "conflict_total": batch_by_site[site.id].conflict_total,
+                        "needs_review_total": batch_by_site[site.id].needs_review_total,
+                        "review_open_total": batch_by_site[site.id].review_open_total,
+                    }
+                    for site in sites
+                ],
+            },
         }
         run.log_text = "\n".join(
             [
                 f"巡检 {run.run_no}：{len(sites)} 个站点、{totals['pages']} 个分页清单页",
+                f"sitemap 快照指纹 {run.snapshot_fingerprint[:12]}…（{len(batches)} 个已激活批次，全程同一批分片）",
                 f"抓取链接 {totals['links']} 条，canonical 去重后 {totals['unique']} 条（重复率 {dup_ratio:.2%}）",
                 f"目录条目 {totals['catalog_total']} 条、sitemap loc {totals['sitemap_total']} 条",
                 f"三向命中 {totals['hit']} 条 → 覆盖率 {coverage:.2%}，不可达率 {unreachable_rate:.2%}",
@@ -250,9 +323,11 @@ def execute_run(db: Session, run: CrawlRun, sites: list[Site]) -> CrawlRun:
         )
         run.status = CrawlStatus.SUCCESS.value if sites else CrawlStatus.PARTIAL.value
     except Exception as exc:  # noqa: BLE001 - 运行失败留痕，不抛 500
+        # 注意：只标记本次运行失败。已有缺陷与整改记录属于历史运行，绝不删除；
+        # 本次 _upsert_defects 的写入随外层 session 回滚，半批结果不进覆盖率。
         run.status = CrawlStatus.FAILED.value
         run.log_text = f"巡检失败：{exc}"
-        run.metrics = {"error": str(exc)[:300]}
+        run.metrics = {"error": str(exc)[:300], "snapshot_fingerprint": run.snapshot_fingerprint}
     run.finished_at = utcnow()
     db.flush()
     return run

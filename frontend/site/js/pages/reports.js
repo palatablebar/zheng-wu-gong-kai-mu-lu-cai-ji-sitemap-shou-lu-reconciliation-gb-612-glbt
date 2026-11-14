@@ -48,6 +48,21 @@ async function renderCoverage(view, ctx) {
   const run = await api.get(`/api/crawl-runs/${latest.id}`);
   const sites = (run.metrics || {}).sites || [];
   const totals = (run.metrics || {}).totals || {};
+  const snapshot = (run.metrics || {}).snapshot;
+  const snapshotRows = snapshot
+    ? snapshot.batches
+        .map(
+          (batch) => `<tr>
+            <td class="mono">${esc(batch.site_code)}</td>
+            <td class="mono">${esc(batch.batch_no)}</td>
+            <td class="num">${esc(batch.shards)}</td>
+            <td class="num">${esc(batch.conflict_total)}</td>
+            <td class="num">${esc(batch.needs_review_total)} / 未裁决 ${esc(batch.review_open_total)}</td>
+            <td class="mono muted">${esc((batch.fingerprint || '—').slice(0, 12))}</td>
+          </tr>`,
+        )
+        .join('')
+    : '';
   return `
     <section class="panel">
       <div class="panel-head">
@@ -64,6 +79,15 @@ async function renderCoverage(view, ctx) {
           <dt>重复率</dt><dd class="mono">${esc(fmtPct(run.dup_ratio))}（抓取 ${esc(fmtNum(run.links))} 条 → 去重 ${esc(fmtNum(run.unique_links))} 条）</dd>
           <dt>缺陷构成</dt><dd>P0 ${esc(run.p0_count)} / P1 ${esc(run.p1_count)} / P2 ${esc(run.p2_count)}，合计 ${esc(run.defect_count)} 条</dd>
         </div>
+        ${
+          snapshot
+            ? `<div class="rule-label" style="margin-top:14px">本批 sitemap 快照（采集 / 合并 / 探测 / 对账同一指纹）</div>
+          <div class="table-wrap"><table class="data" style="min-width:0">
+            <thead><tr><th>站点</th><th>快照批次</th><th>分片</th><th>冲突数</th><th>待复核</th><th>指纹</th></tr></thead>
+            <tbody>${snapshotRows}</tbody></table></div>
+          <p class="mono muted" style="margin:8px 0 0">组合指纹：<span class="mono">${esc((snapshot.fingerprint || '—').slice(0, 32))}…</span>；失败运行与半批结果不会出现在本报表。</p>`
+            : ''
+        }
         <div class="rule-label" style="margin-top:14px">站点明细</div>
         ${coverageTable(sites)}
       </div>

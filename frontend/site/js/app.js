@@ -6,12 +6,14 @@ import loginPage from './pages/login.js';
 import overviewPage from './pages/overview.js';
 import sitesPage from './pages/sites.js';
 import crawlRunsPage from './pages/crawl-runs.js';
+import snapshotsPage from './pages/snapshots.js';
 import defectsPage from './pages/defects.js';
 import reportsPage from './pages/reports.js';
 
 const routes = [
   { path: '#/overview', page: overviewPage, permission: 'overview:read' },
   { path: '#/sites', page: sitesPage, permission: 'site:read' },
+  { path: '#/snapshots', page: snapshotsPage, permission: 'crawl:read' },
   { path: '#/crawl-runs', page: crawlRunsPage, permission: 'crawl:read' },
   { path: '#/defects', page: defectsPage, permission: 'defect:read' },
   { path: '#/reports', page: reportsPage, permission: 'defect:read' },

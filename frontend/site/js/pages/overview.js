@@ -44,7 +44,9 @@ export const overviewPage = {
                 <div class="rule-label">本次口径</div>
                 <div class="sc-row"><span>政务站（启用 / 登记）</span><b>${esc(data.sites_enabled)} / ${esc(data.sites_total)}</b></div>
                 <div class="sc-row"><span>公开目录条目 A</span><b>${esc(fmtNum(data.catalog_total))}</b></div>
-                <div class="sc-row"><span>sitemap loc B</span><b>${esc(fmtNum(data.sitemap_total))}</b></div>
+                <div class="sc-row"><span>sitemap loc B</span><b>${esc(fmtNum(data.sitemap_total))}</span></div>
+                <div class="sc-row"><span>快照批次（已激活）</span><b>${esc(fmtNum(data.active_snapshot_batches || 0))}</b></div>
+                <div class="sc-row"><span>快照待复核冲突</span><b>${esc(fmtNum(data.snapshot_review_open || 0))}</b></div>
                 <div class="sc-row"><span>不可达率（A\\C）</span><b>${esc(fmtPct(data.unreachable_rate))}</b></div>
                 <div class="sc-row"><span>后台任务</span><b>${data.worker_alive ? 'worker 在岗' : '心跳超时'}</b></div>
               </div>

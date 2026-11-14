@@ -1203,3 +1203,44 @@ pre.code {
     min-width: 560px;
   }
 }
+
+/* ---------- sitemap 快照：依据 chip 与待复核卡片 ---------- */
+.chip.danger {
+  border-color: var(--danger);
+  background: var(--danger-wash);
+  color: var(--danger);
+}
+.chip.danger b {
+  color: var(--danger);
+}
+.chip.warn {
+  border-color: var(--warn);
+  background: var(--warn-wash);
+}
+.chip.ok {
+  border-color: var(--info);
+  background: var(--info-wash);
+  color: var(--info);
+}
+.chip.ok b {
+  color: var(--info);
+}
+
+.review-card {
+  border: 1px solid var(--rule-strong);
+  border-left: 3px solid var(--danger);
+  border-radius: 10px;
+  background: var(--paper);
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+.review-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.review-card .field {
+  margin: 0;
+}

@@ -16,12 +16,21 @@
 """
 from __future__ import annotations
 
+import gzip
 import json
 import os
 from datetime import date, timedelta
 from pathlib import Path
 
 from src.constants.demo_data import COLUMN_NAMES, COLUMNS, PAGE_SIZE, TITLE_PATTERNS, WORDS
+
+# sitemap 索引下的叶子分片：前两个明文 xml，第三个 gzip 压缩（部分分片压缩后读取）
+SHARD_FILES: list[str] = ["sitemap-1.xml", "sitemap-2.xml", "sitemap-3.xml.gz"]
+SHARD_COUNT = 3
+# 非法 lastmod：合并规则无法裁决，canonical 进待复核
+CONFLICT_INVALID_LASTMOD = "2026-13-99"
+# 跨分片冲突注入目标（栏目首条；三站栏目集合一致，路径都存在）
+CONFLICT_TARGET_COLUMNS = ["zcwj", "czjs", "zdxm", "rsrm"]
 
 def _default_fixture_base() -> Path:
     explicit = os.environ.get("SITEMAP_FIXTURE_DIR")
@@ -148,6 +157,90 @@ def sitemap_xml(rows: list[dict]) -> str:
         + "\n".join(body)
         + "\n</urlset>\n"
     )
+
+
+def sitemap_index_xml(spec: dict, shard_files: list[str]) -> str:
+    """sitemap 入口：一个 sitemapindex 指向同站多个分片（含 .xml.gz）。"""
+    home = spec["home_url"].rstrip("/")
+    body = [
+        "  <sitemap>\n"
+        f"    <loc>{home}/{name}</loc>\n"
+        f"    <lastmod>{LASTMOD_ANCHOR.isoformat()}</lastmod>\n"
+        "  </sitemap>"
+        for name in shard_files
+    ]
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+        + "\n".join(body)
+        + "\n</sitemapindex>\n"
+    )
+
+
+def _conflict_plan(spec: dict, rows: list[dict]) -> dict[str, dict]:
+    """每个站点 4 个确定性跨分片 lastmod 冲突（canonical -> 分片内重复副本）。
+
+    - zcwj：重复副本 lastmod 更新（lastmod_latest 裁决）；
+    - czjs：重复副本 lastmod 更旧（仍取最新的基础分片值，依据 lastmod_latest）；
+    - zdxm：重复副本 lastmod 与基础值相同（并列，按 shard_order_min 裁决）；
+    - rsrm：重复副本 lastmod 非法（无法裁决，进待复核）。
+    所有重复副本都落在与基础条目不同的分片，且不引入新的 canonical（集合口径不变）。
+    """
+    row_index = {row["loc"]: position for position, row in enumerate(rows)}
+    plans: dict[str, dict] = {}
+    for column_code in CONFLICT_TARGET_COLUMNS:
+        path = item_path(column_code, 1)
+        loc = f"{spec['home_url']}{path}"
+        position = row_index.get(loc)
+        if position is None:
+            continue
+        base = rows[position]
+        base_order = position % SHARD_COUNT  # 与 sitemap_shards 的切分逻辑保持一致
+        dup_order = (base_order + 1) % SHARD_COUNT  # 必然跨分片
+        base_date = base["lastmod"]
+        if column_code == "zcwj":
+            dup_lastmod = (date.fromisoformat(base_date) + timedelta(days=10)).isoformat()
+        elif column_code == "czjs":
+            dup_lastmod = (date.fromisoformat(base_date) - timedelta(days=10)).isoformat()
+        elif column_code == "zdxm":
+            dup_lastmod = base_date  # 并列 -> shard_order_min
+        else:
+            dup_lastmod = CONFLICT_INVALID_LASTMOD  # 非法 -> 待复核
+        plans[base["canonical_url"]] = {
+            "base": dict(base),
+            "base_order": base_order,
+            "dup": {
+                "loc": base["loc"],
+                "canonical_url": base["canonical_url"],
+                "lastmod": dup_lastmod,
+                "changefreq": base["changefreq"],
+                "priority": base["priority"],
+                "source_file": SHARD_FILES[dup_order],
+            },
+            "dup_order": dup_order,
+        }
+    return plans
+
+
+def sitemap_shards(spec: dict, rows: list[dict] | None = None) -> list[dict]:
+    """把该站 sitemap 全集切成 SHARD_COUNT 个分片，并注入跨分片 lastmod 冲突。
+
+    返回 ``[{"file", "gzip", "rows"}]``；canonical 全集与 :func:`sitemap_rows` 完全一致，
+    重复条目只是同一 canonical 在另一个分片再出现一次。
+    """
+    rows = rows if rows is not None else sitemap_rows(spec)
+    buckets: list[list[dict]] = [[] for _ in range(SHARD_COUNT)]
+    for index, row in enumerate(rows):
+        order = index % SHARD_COUNT
+        buckets[order].append({**row, "source_file": SHARD_FILES[order]})
+
+    for plan in _conflict_plan(spec, rows).values():
+        buckets[plan["dup_order"]].append(plan["dup"])
+
+    return [
+        {"file": SHARD_FILES[index], "gzip": SHARD_FILES[index].endswith(".gz"), "rows": shard_rows}
+        for index, shard_rows in enumerate(buckets)
+    ]
 
 
 def _head(title: str, canonical: str | None) -> str:
@@ -288,9 +381,19 @@ def build_site(spec: dict, root: Path) -> dict:
             _write(root, item_path(column_code, item_no), _detail_html(spec, column_code, item_no))
             written += 1
 
+    # sitemap 入口是索引，下面挂同站多个分片（最后一个 gzip）；同 canonical 跨分片重复
     rows = sitemap_rows(spec)
-    _write(root, "/sitemap.xml", sitemap_xml(rows))
+    shards = sitemap_shards(spec, rows)
+    _write(root, "/sitemap.xml", sitemap_index_xml(spec, [shard["file"] for shard in shards]))
     written += 1
+    for shard in shards:
+        payload = sitemap_xml(shard["rows"]).encode("utf-8")
+        if shard["gzip"]:
+            payload = gzip.compress(payload, mtime=0)
+        target = root / shard["file"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
+        written += 1
 
     status_map: dict[str, int] = {}
     for dead_path in spec.get("dead", []):
@@ -302,17 +405,18 @@ def build_site(spec: dict, root: Path) -> dict:
         json.dumps(dict(sorted((spec.get("redirects") or {}).items())), ensure_ascii=False, indent=2) + "\n",
     )
     written += 2
-    return {"root": str(root), "files": written, "sitemap": len(rows)}
+    return {"root": str(root), "files": written, "sitemap": len(rows), "shards": len(shards)}
 
 
 def ensure_site_fixture(spec: dict, base: Path | None = None) -> dict:
-    """fixture 缺失或 sitemap 不完整时重建；返回写盘统计。"""
+    """fixture 缺失或 sitemap 索引/分片不完整时重建；返回写盘统计。"""
     root = fixture_root(spec["code"], base)
     expected = root / "sitemap.xml"
     if expected.is_file() and (root / "index.html").is_file():
         # 只做完整性抽检，避免每次巡检都重写 400 个文件
         missing = [code for code, _n, _s in COLUMNS if not (root / "xxgk" / code / "index.html").is_file()]
-        if not missing:
+        missing_shards = [name for name in SHARD_FILES if not (root / name).is_file()]
+        if not missing and not missing_shards:
             return {"root": str(root), "files": 0, "sitemap": 0, "reused": True}
     return {**build_site(spec, root), "reused": False}
 

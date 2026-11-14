@@ -20,6 +20,27 @@ function sitesTable(sites) {
       .join('')}</tbody></table></div>`;
 }
 
+function snapshotBlock(run) {
+  const snapshot = (run.metrics || {}).snapshot;
+  if (!snapshot) return '<p class="muted">该运行没有快照信息（旧版巡检）。</p>';
+  const rows = (snapshot.batches || [])
+    .map(
+      (batch) => `<tr>
+        <td class="mono">${esc(batch.site_code)}</td>
+        <td class="mono">${esc(batch.batch_no)}</td>
+        <td class="num">${esc(batch.shards)}</td>
+        <td class="num">${esc(batch.conflict_total)}</td>
+        <td class="num">${esc(batch.needs_review_total)}（未裁决 ${esc(batch.review_open_total)}）</td>
+        <td class="mono muted">${esc((batch.fingerprint || '—').slice(0, 12))}</td>
+      </tr>`,
+    )
+    .join('');
+  return `<div class="table-wrap"><table class="data" style="min-width:0">
+    <thead><tr><th>站点</th><th>快照批次</th><th>本批分片</th><th>冲突数</th><th>待复核</th><th>指纹</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>
+    <p class="mono muted" style="margin:8px 0 0">合并/采集/探测/对账全程同一批快照，组合指纹：<span class="mono">${esc((snapshot.fingerprint || '—').slice(0, 24))}…</span></p>`;
+}
+
 function openRun(view, ctx, run) {
   const { root } = drawer({
     title: `巡检 ${run.run_no}`,
@@ -36,6 +57,8 @@ function openRun(view, ctx, run) {
       ['开始', fmtTime(run.started_at)],
       ['结束', fmtTime(run.finished_at)],
     ])}
+    <div class="rule-label">本批 sitemap 快照（同一批分片贯穿全流程）</div>
+    ${snapshotBlock(run)}
     <div class="rule-label">站点明细</div>
     ${sitesTable((run.metrics || {}).sites || [])}
     <div class="rule-label">运行日志</div>

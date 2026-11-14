@@ -17,12 +17,16 @@ def serialize(entry: SitemapEntry, site_name: str | None = None, site_code: str 
         "site_id": entry.site_id,
         "site_name": site_name,
         "site_code": site_code,
+        "batch_id": entry.batch_id,
         "loc": entry.loc,
         "canonical_url": entry.canonical_url,
         "lastmod": entry.lastmod,
         "changefreq": entry.changefreq,
         "priority": entry.priority,
         "source_file": entry.source_file,
+        "decision_basis": getattr(entry, "decision_basis", "single_source"),
+        "needs_review": bool(getattr(entry, "needs_review", False)),
+        "review_status": getattr(entry, "review_status", "none"),
         "created_at": iso_utc(entry.created_at),
     }
 
@@ -78,6 +82,11 @@ def create_entry(db: Session, payload: dict) -> SitemapEntry:
         changefreq=payload.get("changefreq") or "weekly",
         priority=float(payload.get("priority") or 0.8),
         source_file=payload.get("source_file") or "sitemap.xml",
+        # 人工补录不属于任何快照批次，按单一来源口径展示
+        batch_id=None,
+        decision_basis="single_source",
+        needs_review=False,
+        review_status="none",
     )
     db.add(entry)
     db.flush()
